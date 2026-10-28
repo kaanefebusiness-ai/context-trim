@@ -1,11 +1,11 @@
 {
   "name": "context-trim",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Smart CLI and MCP server to trim, filter, and pack codebase context for LLMs (Claude Code, ChatGPT, Cursor). Cut token bloat by 70%+.",
   "type": "module",
   "main": "./src/index.js",
   "bin": {
-    "context-trim": "./bin/cli.js"
+    "context-trim": "bin/cli.js"
   },
   "files": [
     "bin",
@@ -35,7 +35,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kaanefebusiness-ai/context-trim.git"
+    "url": "git+https://github.com/kaanefebusiness-ai/context-trim.git"
   },
   "bugs": {
     "url": "https://github.com/kaanefebusiness-ai/context-trim/issues"
