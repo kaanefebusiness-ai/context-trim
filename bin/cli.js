@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { scanCodebase, formatAIContext } from '../src/index.js';
+import { scanCodebase, formatAIContext, copyToClipboard } from '../src/index.js';
 import { startMCPServer } from '../src/mcp.js';
 
 const args = process.argv.slice(2);
@@ -20,6 +20,7 @@ USAGE:
 
 OPTIONS:
   -o, --output <file>    Save packed context to a markdown file (e.g. ai-context.md)
+  -c, --copy             Copy packed context directly to clipboard
   --stats                Print detailed token usage and bloat statistics only
   --tree                 Print filtered file tree only
   --budget <tokens>      Cap maximum token budget (e.g. 40000)
@@ -28,22 +29,24 @@ OPTIONS:
   -h, --help             Show help
 
 EXAMPLES:
-  npx context-trim                   # Packs current directory and prints summary
-  npx context-trim -o ai-context.md  # Exports clean markdown ready for Claude / ChatGPT
-  npx context-trim --stats           # Analyzes token bloat
+  npx context-trim                   # Packs current directory and saves ai-context.md
+  npx context-trim -c                # Packs and copies directly to clipboard
+  npx context-trim -o prompt.md      # Exports clean markdown
+  npx context-trim --stats           # Analyzes token bloat and estimated cost savings
   npx context-trim --mcp             # Starts MCP server
 `);
   process.exit(0);
 } else if (args.includes('--version') || args.includes('-v')) {
-  console.log('context-trim v1.0.0');
+  console.log('context-trim v1.2.0');
   process.exit(0);
 } else {
   runCLI();
 }
 
-function runCLI() {
+async function runCLI() {
   const isStats = args.includes('--stats');
   const isTree = args.includes('--tree');
+  const shouldCopy = args.includes('-c') || args.includes('--copy');
   
   let outputFile = null;
   const oIndex = args.indexOf('-o') !== -1 ? args.indexOf('-o') : args.indexOf('--output');
@@ -93,28 +96,49 @@ function runCLI() {
   // Pack context
   const packedMarkdown = formatAIContext(scan, { budget });
 
-  if (outputFile) {
-    const dest = path.resolve(targetDir, outputFile);
-    fs.writeFileSync(dest, packedMarkdown, 'utf8');
-    console.log(`\n\x1b[32m✔ Successfully packed codebase into:\x1b[0m \x1b[1m${dest}\x1b[0m`);
+  if (shouldCopy) {
+    try {
+      await copyToClipboard(packedMarkdown);
+      console.log(`\n\x1b[32m✔ Packed context copied directly to clipboard! (Ready to Cmd+V into Claude / ChatGPT)\x1b[0m`);
+    } catch (_) {
+      console.log(`\n\x1b[33m⚠ Clipboard not accessible in this environment, saving to file instead.\x1b[0m`);
+      saveToFile(targetDir, outputFile, packedMarkdown);
+    }
   } else {
-    // If no output file specified, save to default ai-context.md in current dir
-    const defaultOutput = path.resolve(targetDir, 'ai-context.md');
-    fs.writeFileSync(defaultOutput, packedMarkdown, 'utf8');
-    console.log(`\n\x1b[32m✔ Context saved to:\x1b[0m \x1b[1m${defaultOutput}\x1b[0m`);
+    saveToFile(targetDir, outputFile, packedMarkdown);
   }
 
   printStats(scan, elapsed);
-  console.log(`\x1b[90m💡 Tip: Drop the generated file into Claude, ChatGPT, or Cursor for lean prompts.\x1b[0m\n`);
+}
+
+function saveToFile(targetDir, outputFile, content) {
+  if (outputFile) {
+    const dest = path.resolve(targetDir, outputFile);
+    fs.writeFileSync(dest, content, 'utf8');
+    console.log(`\n\x1b[32m✔ Successfully packed codebase into:\x1b[0m \x1b[1m${dest}\x1b[0m`);
+  } else {
+    const defaultOutput = path.resolve(targetDir, 'ai-context.md');
+    fs.writeFileSync(defaultOutput, content, 'utf8');
+    console.log(`\n\x1b[32m✔ Context saved to:\x1b[0m \x1b[1m${defaultOutput}\x1b[0m`);
+  }
 }
 
 function printStats(scan, elapsed) {
-  console.log('\n' + '─'.repeat(52));
+  // Cost savings estimate: Claude 3.5 Sonnet / GPT-4o input cost (~$3 per 1M tokens)
+  const estimatedSavingsUSD = ((scan.estimatedSavedTokens / 1_000_000) * 3.0).toFixed(4);
+
+  console.log('\n' + '─'.repeat(54));
   console.log(`\x1b[1m⚡ context-trim Summary\x1b[0m \x1b[90m(${elapsed}ms)\x1b[0m`);
-  console.log('─'.repeat(52));
-  console.log(`  Included Files       : \x1b[32m${scan.totalFiles}\x1b[0m`);
-  console.log(`  Skipped Bloat Files  : \x1b[33m${scan.skippedCount} (lockfiles, binaries, node_modules...)\x1b[0m`);
+  console.log('─'.repeat(54));
+  console.log(`  Included Clean Files : \x1b[32m${scan.totalFiles}\x1b[0m`);
+  console.log(`  Skipped Bloat Files  : \x1b[33m${scan.skippedCount} (lockfiles, caches, artifacts)\x1b[0m`);
   console.log(`  Estimated Tokens     : \x1b[36m~${scan.totalTokens.toLocaleString()}\x1b[0m`);
   console.log(`  Payload Size         : \x1b[36m${Math.round(scan.totalBytes / 1024)} KB\x1b[0m`);
-  console.log('─'.repeat(52) + '\n');
+  if (scan.totalSecretsMasked > 0) {
+    console.log(`  Security Shield      : \x1b[32m🛡️ ${scan.totalSecretsMasked} secret key(s) redacted\x1b[0m`);
+  }
+  if (scan.estimatedSavedTokens > 0) {
+    console.log(`  Estimated Savings    : \x1b[32m~${scan.estimatedSavedTokens.toLocaleString()} tokens (~$${estimatedSavingsUSD} per prompt)\x1b[0m`);
+  }
+  console.log('─'.repeat(54) + '\n');
 }

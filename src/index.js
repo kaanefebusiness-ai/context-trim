@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 // Default smart ignore directories (Node, Python, Go, Rust, Java, Docker, IDEs)
 export const DEFAULT_IGNORE_DIRS = new Set([
@@ -62,6 +63,40 @@ export const DEFAULT_IGNORE_FILES = new Set([
   '.DS_Store',
   'Thumbs.db'
 ]);
+
+// Secret regex patterns to redact sensitive credentials before LLM dispatch
+const SECRET_PATTERNS = [
+  // OpenAI API Key
+  /(sk-[a-zA-Z0-9_-]{20,80})/g,
+  // Anthropic API Key
+  /(sk-ant-[a-zA-Z0-9_-]{20,80})/g,
+  // GitHub PAT
+  /(gh[pousr]_[A-Za-z0-9_]{30,80})/g,
+  // AWS Access Key ID
+  /(AKIA[0-9A-Z]{16})/g,
+  // Slack Tokens
+  /(xox[baprs]-[0-9A-Za-z]{10,48})/g,
+  // Generic Private Keys
+  /-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g
+];
+
+/**
+ * Mask and redact known sensitive keys from file content
+ */
+export function redactSecrets(content) {
+  if (!content) return { redacted: '', foundCount: 0 };
+  let count = 0;
+  let text = content;
+
+  for (const pattern of SECRET_PATTERNS) {
+    text = text.replace(pattern, () => {
+      count++;
+      return '[REDACTED_SECRET_KEY]';
+    });
+  }
+
+  return { redacted: text, foundCount: count };
+}
 
 /**
  * Estimate token count from character length.
@@ -135,18 +170,20 @@ export function scanCodebase(dirPath, options = {}) {
         if (!shouldIgnore(relPath, true)) {
           walk(fullPath);
         } else {
-          skipped.push({ path: relPath, reason: 'directory ignored' });
+          skipped.push({ path: relPath, size: 0, reason: 'directory ignored' });
         }
       } else if (entry.isFile()) {
         if (shouldIgnore(relPath, false)) {
-          skipped.push({ path: relPath, reason: 'file type / lockfile ignored' });
+          let s = 0;
+          try { s = fs.statSync(fullPath).size; } catch (_) {}
+          skipped.push({ path: relPath, size: s, reason: 'file type / lockfile ignored' });
           continue;
         }
 
         try {
           const stat = fs.statSync(fullPath);
           if (stat.size > maxFileSizeBytes) {
-            skipped.push({ path: relPath, reason: `exceeds size limit (${Math.round(stat.size / 1024)} KB)` });
+            skipped.push({ path: relPath, size: stat.size, reason: `exceeds size limit (${Math.round(stat.size / 1024)} KB)` });
             continue;
           }
 
@@ -162,9 +199,10 @@ export function scanCodebase(dirPath, options = {}) {
 
   walk(root);
 
-  // Read content & calculate tokens
+  // Read content, redact secrets & calculate tokens
   let totalRawBytes = 0;
   let totalRawTokens = 0;
+  let totalSecretsMasked = 0;
 
   const files = results.map(item => {
     let content = '';
@@ -174,7 +212,10 @@ export function scanCodebase(dirPath, options = {}) {
       content = '[Binary or unreadable file]';
     }
 
-    const tokens = estimateTokens(content);
+    const { redacted, foundCount } = redactSecrets(content);
+    totalSecretsMasked += foundCount;
+
+    const tokens = estimateTokens(redacted);
     totalRawBytes += item.size;
     totalRawTokens += tokens;
 
@@ -182,17 +223,24 @@ export function scanCodebase(dirPath, options = {}) {
       path: item.relPath,
       size: item.size,
       tokens,
-      content
+      content: redacted
     };
   });
+
+  // Calculate estimated saved tokens from skipped files
+  const skippedBytes = skipped.reduce((acc, f) => acc + (f.size || 0), 0);
+  const estimatedSavedTokens = Math.max(estimateTokens('x'.repeat(skippedBytes)), 0);
 
   return {
     root,
     files,
     skippedCount: skipped.length,
+    skippedBytes,
+    estimatedSavedTokens,
     totalFiles: files.length,
     totalBytes: totalRawBytes,
-    totalTokens: totalRawTokens
+    totalTokens: totalRawTokens,
+    totalSecretsMasked
   };
 }
 
@@ -200,7 +248,7 @@ export function scanCodebase(dirPath, options = {}) {
  * Format files into optimized AI Markdown context
  */
 export function formatAIContext(scanResult, options = {}) {
-  const { files, totalTokens, totalFiles } = scanResult;
+  const { files, totalTokens, totalFiles, totalSecretsMasked } = scanResult;
   const budget = options.budget || Infinity;
   const includeTree = options.tree !== false;
 
@@ -208,6 +256,10 @@ export function formatAIContext(scanResult, options = {}) {
     `# Codebase Context (Packed via context-trim)`,
     `Total Files: ${totalFiles} | Estimated Tokens: ${totalTokens.toLocaleString()}`
   ];
+
+  if (totalSecretsMasked > 0) {
+    header.push(`Security: 🛡️ ${totalSecretsMasked} sensitive credential(s) automatically redacted.`);
+  }
 
   if (includeTree) {
     header.push(`\n## File Structure Tree\n`);
@@ -235,4 +287,36 @@ export function formatAIContext(scanResult, options = {}) {
   }
 
   return header.join('\n') + body.join('');
+}
+
+/**
+ * Copy text to native clipboard (macOS, Linux, Windows) with zero dependencies
+ */
+export function copyToClipboard(text) {
+  return new Promise((resolve, reject) => {
+    let proc;
+    if (process.platform === 'darwin') {
+      proc = spawn('pbcopy');
+    } else if (process.platform === 'win32') {
+      proc = spawn('clip');
+    } else {
+      // Linux: try xclip, fallback to wl-copy
+      proc = spawn('xclip', ['-selection', 'clipboard']);
+      proc.on('error', () => {
+        const fallback = spawn('wl-copy');
+        fallback.on('error', reject);
+        fallback.stdin.end(text);
+        resolve();
+      });
+    }
+
+    if (proc) {
+      proc.on('error', reject);
+      proc.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(`Clipboard command exited with code ${code}`));
+      });
+      proc.stdin.end(text);
+    }
+  });
 }

@@ -1,6 +1,6 @@
 {
   "name": "context-trim",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Smart CLI and MCP server to trim, filter, and pack codebase context for LLMs (Claude Code, ChatGPT, Cursor). Cut token bloat by 70%+.",
   "type": "module",
   "main": "./src/index.js",
