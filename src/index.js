@@ -1,12 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Default smart ignore directories and files
+// Default smart ignore directories (Node, Python, Go, Rust, Java, Docker, IDEs)
 export const DEFAULT_IGNORE_DIRS = new Set([
+  // Node / Web
   'node_modules',
-  '.git',
-  '.svn',
-  '.hg',
   '.next',
   '.nuxt',
   'dist',
@@ -14,14 +12,25 @@ export const DEFAULT_IGNORE_DIRS = new Set([
   'out',
   '.output',
   'coverage',
+  '.turbo',
+  '.cache',
+  // Python
   '.venv',
   'venv',
   'env',
   '__pycache__',
   '.pytest_cache',
   '.mypy_cache',
-  '.turbo',
-  '.cache',
+  '.ruff_cache',
+  '.tox',
+  '.eggs',
+  // Go & Rust
+  'target',
+  'vendor',
+  // VCS & IDEs
+  '.git',
+  '.svn',
+  '.hg',
   '.idea',
   '.vscode',
   '.gemini',
@@ -34,7 +43,7 @@ export const DEFAULT_IGNORE_EXTENSIONS = new Set([
   '.mp4', '.mov', '.avi', '.mp3', '.wav', '.ogg',
   '.pdf', '.zip', '.tar', '.gz', '.7z', '.rar',
   '.woff', '.woff2', '.ttf', '.eot', '.otf',
-  '.exe', '.bin', '.dll', '.so', '.dylib',
+  '.exe', '.bin', '.dll', '.so', '.dylib', '.pyc', '.pyo', '.pyd',
   // Minified and maps
   '.min.js', '.min.css', '.map',
   // Lockfiles & databases
@@ -47,6 +56,7 @@ export const DEFAULT_IGNORE_FILES = new Set([
   'pnpm-lock.yaml',
   'bun.lockb',
   'poetry.lock',
+  'Pipfile.lock',
   'Cargo.lock',
   'composer.lock',
   '.DS_Store',
@@ -192,15 +202,19 @@ export function scanCodebase(dirPath, options = {}) {
 export function formatAIContext(scanResult, options = {}) {
   const { files, totalTokens, totalFiles } = scanResult;
   const budget = options.budget || Infinity;
+  const includeTree = options.tree !== false;
 
   const header = [
     `# Codebase Context (Packed via context-trim)`,
-    `Total Files: ${totalFiles} | Estimated Tokens: ${totalTokens.toLocaleString()}`,
-    `\n## File Structure Tree\n`
+    `Total Files: ${totalFiles} | Estimated Tokens: ${totalTokens.toLocaleString()}`
   ];
 
-  const treeLines = files.map(f => `- ${f.path} (${f.tokens} tokens)`);
-  header.push(treeLines.join('\n'));
+  if (includeTree) {
+    header.push(`\n## File Structure Tree\n`);
+    const treeLines = files.map(f => `- ${f.path} (${f.tokens} tokens)`);
+    header.push(treeLines.join('\n'));
+  }
+  
   header.push('\n---\n');
 
   let accumulatedTokens = estimateTokens(header.join('\n'));
