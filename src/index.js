@@ -203,7 +203,7 @@ export function scanCodebase(dirPath, options = {}) {
   }
 
   function shouldIgnore(relPath, isDir) {
-    const segments = relPath.split(path.sep);
+    const segments = relPath.split('/');
     for (const seg of segments) {
       if (DEFAULT_IGNORE_DIRS.has(seg)) return true;
     }
@@ -218,7 +218,7 @@ export function scanCodebase(dirPath, options = {}) {
 
     // Quick match on gitignore patterns
     for (const pat of gitignorePatterns) {
-      if (relPath === pat || relPath.startsWith(pat + path.sep) || baseName === pat) {
+      if (relPath === pat || relPath.startsWith(pat + '/') || baseName === pat) {
         return true;
       }
     }
@@ -235,7 +235,8 @@ export function scanCodebase(dirPath, options = {}) {
 
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name);
-      const relPath = path.relative(root, fullPath);
+      // Forward slashes everywhere, so .gitignore rules and the packed output match on Windows too
+      const relPath = path.relative(root, fullPath).split(path.sep).join('/');
 
       if (entry.isDirectory()) {
         if (!shouldIgnore(relPath, true)) {
