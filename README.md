@@ -4,7 +4,7 @@
 > Zero-dependency CLI, local MCP server, Claude plugin, and remote MCP server for **Claude Code, Claude, ChatGPT, Codex, and Cursor**.
 
 [![CI](https://github.com/kaanefebusiness-ai/context-trim/actions/workflows/ci.yml/badge.svg)](https://github.com/kaanefebusiness-ai/context-trim/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v1.3.0-blue.svg)](https://www.npmjs.com/package/context-trim)
+[![npm version](https://img.shields.io/badge/npm-v1.3.1-blue.svg)](https://www.npmjs.com/package/context-trim)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
 [![MCP Ready](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
@@ -79,7 +79,7 @@ Add it to your MCP configuration (for Claude Desktop, `claude_desktop_config.jso
   "mcpServers": {
     "context-trim": {
       "command": "npx",
-      "args": ["-y", "context-trim@1.3.0", "--mcp"]
+      "args": ["-y", "context-trim@1.3.1", "--mcp"]
     }
   }
 }
