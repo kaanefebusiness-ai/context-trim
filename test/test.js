@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { scanCodebase, estimateTokens, formatAIContext, redactSecrets, isSecretFile } from '../src/index.js';
 import { createMessageHandler, resolveInsideRoot, SERVER_VERSION } from '../src/mcp.js';
 import { parseRepository, extractTar } from '../src/remote.js';
@@ -150,6 +150,37 @@ const lines = stdout.trim().split('\n');
 assert.strictEqual(lines.length, 2, 'One line per reply, none for the notification');
 assert.deepStrictEqual(lines.map(l => JSON.parse(l).id), [1, 2]);
 
+// Test 9b: when the client shares MCP roots, they become the workspace
+const rootsReply = await new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [path.join(repoRoot, 'bin', 'cli.js'), '--mcp'], { cwd: os.tmpdir() });
+  let out = '';
+  const replies = [];
+  child.on('error', reject);
+  child.on('close', () => resolve(replies));
+  child.stdout.on('data', d => {
+    out += d;
+    let i;
+    while ((i = out.indexOf('\n')) !== -1) {
+      const msg = JSON.parse(out.slice(0, i));
+      out = out.slice(i + 1);
+      replies.push(msg);
+      if (msg.method === 'roots/list') {
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { roots: [{ uri: pathToFileURL(project).href }] } }) + '\n');
+        setTimeout(() => {
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'get_clean_codebase_context', arguments: {} } }) + '\n');
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'analyze_token_waste', arguments: { path: os.tmpdir() } } }) + '\n');
+        }, 50);
+      }
+      if (msg.id === 3) child.stdin.end();
+    }
+  });
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: { roots: {} } } }) + '\n');
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+});
+const rootsPack = rootsReply.find(m => m.id === 2);
+assert.ok(rootsPack.result.content[0].text.includes('src/app.js'), 'Client root is packed, not the working directory');
+assert.strictEqual(rootsReply.find(m => m.id === 3).result.isError, true, 'Working directory is off limits once roots are shared');
+
 // Test 10: GitHub repository parsing
 assert.deepStrictEqual(parseRepository('vercel/next.js'), { owner: 'vercel', repo: 'next.js', ref: 'HEAD' });
 assert.deepStrictEqual(parseRepository('https://github.com/a/b.git'), { owner: 'a', repo: 'b', ref: 'HEAD' });
@@ -182,6 +213,12 @@ extractTar(zlib.gunzipSync(zlib.gzipSync(tarball)), unpackDir);
 assert.strictEqual(fs.readFileSync(path.join(unpackDir, 'src', 'index.js'), 'utf8'), 'export {};');
 assert.ok(!fs.existsSync(path.resolve(unpackDir, '..', '..', 'evil.txt')), 'Path traversal must be blocked');
 assert.ok(!fs.existsSync(path.join(unpackDir, 'link')), 'Symlinks are skipped');
+
+// Test 12: every manifest ships the same version as package.json
+for (const manifest of ['.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
+  const { version } = JSON.parse(fs.readFileSync(path.join(repoRoot, manifest), 'utf8'));
+  assert.strictEqual(version, SERVER_VERSION, `${manifest} version must match package.json`);
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('✔ All tests passed successfully!');

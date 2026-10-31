@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { scanCodebase, formatAIContext } from './index.js';
 
 /**
@@ -114,22 +115,41 @@ const REMOTE_TOOLS = [
 ];
 
 /**
- * Resolve a requested path and refuse anything outside the workspace root.
+ * Resolve a requested path and refuse anything outside the workspace roots.
+ * Relative paths resolve against the first root.
  */
-export function resolveInsideRoot(root, requested) {
-  const realRoot = fs.realpathSync(root);
-  const target = path.resolve(realRoot, requested || '.');
+export function resolveInsideRoot(roots, requested) {
+  const realRoots = [].concat(roots).map(r => fs.realpathSync(r));
+  const target = path.resolve(realRoots[0], requested || '.');
   let realTarget;
   try {
     realTarget = fs.realpathSync(target);
   } catch (_) {
     throw new Error(`Folder not found: ${requested}`);
   }
-  const rel = path.relative(realRoot, realTarget);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Access denied: "${requested}" is outside the workspace (${realRoot}).`);
+  const inside = realRoots.some(root => {
+    const rel = path.relative(root, realTarget);
+    return !rel.startsWith('..') && !path.isAbsolute(rel);
+  });
+  if (!inside) {
+    throw new Error(`Access denied: "${requested}" is outside the workspace (${realRoots.join(', ')}).`);
   }
   return realTarget;
+}
+
+/**
+ * Turn MCP roots (file:// URIs from roots/list) into existing local folders.
+ */
+export function rootsFromList(list) {
+  return (list || [])
+    .map(r => {
+      try {
+        return r?.uri?.startsWith('file:') ? fileURLToPath(r.uri) : null;
+      } catch (_) {
+        return null;
+      }
+    })
+    .filter(p => p && fs.existsSync(p));
 }
 
 function readBudget(value) {
@@ -161,7 +181,11 @@ export function formatWasteReport(scan, label) {
  * mode 'local'  → tools read folders under `root`
  * mode 'remote' → tools read public GitHub repositories through `remote`
  */
-export function createMessageHandler({ mode = 'local', root = process.cwd(), remote } = {}) {
+export function createMessageHandler({ mode = 'local', root = process.cwd(), getRoots, remote } = {}) {
+  const currentRoots = () => {
+    const fromClient = getRoots ? getRoots() : [];
+    return fromClient.length ? fromClient : [root];
+  };
   const tools = mode === 'remote' ? REMOTE_TOOLS : LOCAL_TOOLS;
 
   const ok = (id, result) => ({ jsonrpc: '2.0', id, result });
@@ -172,11 +196,11 @@ export function createMessageHandler({ mode = 'local', root = process.cwd(), rem
     if (mode === 'local') {
       if (name === 'get_clean_codebase_context') {
         const budget = readBudget(args.budget);
-        const scan = scanCodebase(resolveInsideRoot(root, args.path));
+        const scan = scanCodebase(resolveInsideRoot(currentRoots(), args.path));
         return text(formatAIContext(scan, { budget }));
       }
       if (name === 'analyze_token_waste') {
-        const dir = resolveInsideRoot(root, args.path);
+        const dir = resolveInsideRoot(currentRoots(), args.path);
         return text(formatWasteReport(scanCodebase(dir), dir));
       }
     } else {
@@ -238,11 +262,34 @@ export function createMessageHandler({ mode = 'local', root = process.cwd(), rem
 
 /**
  * stdio transport: one JSON-RPC message per line, nothing else on stdout.
+ * Workspace = the client's MCP roots when it shares them (Claude Code, Codex),
+ * otherwise CONTEXT_TRIM_ROOT or the working directory.
  */
 export function startMCPServer() {
   const root = process.env.CONTEXT_TRIM_ROOT || process.cwd();
-  const handleMessage = createMessageHandler({ mode: 'local', root });
+  let clientRoots = [];
+  let clientSupportsRoots = false;
+  let rootsRequestId = 0;
+
+  const handleMessage = createMessageHandler({ mode: 'local', root, getRoots: () => clientRoots });
   const send = message => process.stdout.write(JSON.stringify(message) + '\n');
+
+  const requestRoots = () => {
+    if (clientSupportsRoots) send({ jsonrpc: '2.0', id: `roots-${++rootsRequestId}`, method: 'roots/list' });
+  };
+
+  // Our own requests to the client, plus the notifications that trigger them
+  function handleClientTraffic(msg) {
+    if (msg.method === 'initialize') {
+      clientSupportsRoots = Boolean(msg.params?.capabilities?.roots);
+    } else if (msg.method === 'notifications/initialized' || msg.method === 'notifications/roots/list_changed') {
+      requestRoots();
+    } else if (typeof msg.id === 'string' && msg.id.startsWith('roots-') && !msg.method) {
+      if (msg.result) clientRoots = rootsFromList(msg.result.roots);
+      return true; // a reply to us, not a request for us
+    }
+    return false;
+  }
 
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -262,7 +309,8 @@ export function startMCPServer() {
         continue;
       }
 
-      const messages = Array.isArray(msg) ? msg : [msg];
+      const messages = (Array.isArray(msg) ? msg : [msg]).filter(m => !(m && typeof m === 'object' && handleClientTraffic(m)));
+      if (!messages.length) continue;
       Promise.all(messages.map(handleMessage)).then(replies => {
         const out = replies.filter(Boolean);
         if (out.length) send(Array.isArray(msg) ? out : out[0]);

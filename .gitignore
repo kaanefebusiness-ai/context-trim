@@ -3,3 +3,4 @@ Thumbs.db
 node_modules/
 ai-context.md
 *.tgz
+dist/

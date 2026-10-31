@@ -85,7 +85,7 @@ Add it to your MCP configuration (for Claude Desktop, `claude_desktop_config.jso
 }
 ```
 
-The server only reads folders inside the workspace it was started in (its working directory, or `CONTEXT_TRIM_ROOT` when set). Requests for any other path, including symlinks that point outside, are refused.
+The server only reads folders inside the workspace: the project roots your client shares over MCP (Claude Code and Codex do this), otherwise `CONTEXT_TRIM_ROOT` or the folder it was started in. Requests for any other path, including symlinks that point outside, are refused.
 
 | Tool | What it does | Annotations |
 |---|---|---|
@@ -115,7 +115,7 @@ Limits: 50 MB download, 200 MB unpacked, 5,000 files, 4 repositories at a time (
 * **Local use (CLI, local MCP server, plugin):** context-trim makes no network requests, collects nothing, and has no telemetry. It reads only the folder you point it at, and the result goes only where you send it.
 * **Remote server:** it receives the repository name you ask for, downloads that public repository from GitHub, returns the packed text, and deletes the download. It stores no repository contents, requests or results, and needs no account.
 
-Full policy: [PRIVACY.md](PRIVACY.md) (also served by the remote server at `/privacy`).
+Full policy: [PRIVACY.md](PRIVACY.md) (also served by the remote server at `/privacy`). Terms: [TERMS.md](TERMS.md).
 
 ---
 

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "context-trim": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/bin/cli.js", "--mcp"]
+    }
+  }
+}
