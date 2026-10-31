@@ -61,24 +61,69 @@ export const DEFAULT_IGNORE_FILES = new Set([
   'Cargo.lock',
   'composer.lock',
   '.DS_Store',
-  'Thumbs.db'
+  'Thumbs.db',
+  // Our own output, so a second run never re-packs the previous pack
+  'ai-context.md'
 ]);
 
-// Secret regex patterns to redact sensitive credentials before LLM dispatch
-const SECRET_PATTERNS = [
-  // OpenAI API Key
-  /(sk-[a-zA-Z0-9_-]{20,80})/g,
-  // Anthropic API Key
-  /(sk-ant-[a-zA-Z0-9_-]{20,80})/g,
-  // GitHub PAT
-  /(gh[pousr]_[A-Za-z0-9_]{30,80})/g,
-  // AWS Access Key ID
-  /(AKIA[0-9A-Z]{16})/g,
-  // Slack Tokens
-  /(xox[baprs]-[0-9A-Za-z]{10,48})/g,
-  // Generic Private Keys
-  /-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g
+// Files that hold credentials are never read, not even for redaction
+const SECRET_FILE_PATTERNS = [
+  /^\.env(\..+)?$/i,            // .env, .env.local, .env.production ...
+  /^\.envrc$/i,
+  /\.(pem|key|p12|pfx|jks|keystore|asc|gpg|kdbx)$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+  /^\.(npmrc|pypirc|netrc|pgpass|git-credentials)$/i,
+  /^(credentials|secrets?)(\.(json|ya?ml|toml|ini))?$/i,
+  /^service[-_]?account.*\.json$/i,
+  /\.tfstate(\.backup)?$/i
 ];
+
+export function isSecretFile(baseName) {
+  // Templates such as .env.example carry no real values and help the model
+  if (/\.(example|sample|template|dist)$/i.test(baseName)) return false;
+  return SECRET_FILE_PATTERNS.some(re => re.test(baseName));
+}
+
+// Secret regex patterns to redact sensitive credentials before LLM dispatch.
+// Order matters: specific prefixes run before the generic `sk-` rule.
+const SECRET_PATTERNS = [
+  // Private key blocks (RSA, EC, OpenSSH, PGP)
+  /-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY( BLOCK)?-----/g,
+  // Anthropic API Key
+  /sk-ant-[A-Za-z0-9_-]{20,200}/g,
+  // OpenAI API Key (sk-, sk-proj-, sk-svcacct-)
+  /sk-[A-Za-z0-9_-]{20,200}/g,
+  // Stripe secret / restricted keys
+  /\b(sk|rk)_(live|test)_[A-Za-z0-9]{16,200}/g,
+  // GitHub tokens (classic and fine-grained)
+  /\bgh[pousr]_[A-Za-z0-9]{30,255}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{40,255}/g,
+  // AWS Access Key ID
+  /\b(AKIA|ASIA)[0-9A-Z]{16}\b/g,
+  // Google API Key
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  // Slack tokens and webhooks
+  /\bxox[abprs]-[0-9A-Za-z-]{10,200}/g,
+  /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g,
+  // JSON Web Tokens
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g
+];
+
+// Password inside a connection string: scheme://user:PASSWORD@host
+const URL_PASSWORD_PATTERN = /([a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)([^\s@/]+)(@)/gi;
+
+// Names that signal a secret value: API_KEY, client_secret, dbPassword ...
+const SECRET_NAME = '[A-Za-z0-9_.-]*?(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer)[A-Za-z0-9_]*';
+
+// Quoted literal in code or config: apiKey = "...", "password": "...", secret: '...'
+const QUOTED_SECRET_PATTERN = new RegExp(
+  `(${SECRET_NAME}["']?\\s*[:=]\\s*)(["'\`])([^"'\`\\s]{8,})\\2`, 'gi');
+
+// .env / shell style line: API_KEY=value or export API_KEY=value
+const ENV_SECRET_PATTERN = new RegExp(
+  `^(\\s*(?:export\\s+)?${SECRET_NAME}\\s*=\\s*)([^\\s"'#]{8,})\\s*$`, 'gim');
+
+const REDACTED = '[REDACTED_SECRET_KEY]';
 
 /**
  * Mask and redact known sensitive keys from file content
@@ -91,9 +136,28 @@ export function redactSecrets(content) {
   for (const pattern of SECRET_PATTERNS) {
     text = text.replace(pattern, () => {
       count++;
-      return '[REDACTED_SECRET_KEY]';
+      return REDACTED;
     });
   }
+
+  text = text.replace(URL_PASSWORD_PATTERN, (_, before, _pw, at) => {
+    count++;
+    return before + REDACTED + at;
+  });
+
+  const isReference = v => v.includes('REDACTED') || /^(\$\{|\$[A-Za-z_]|<.*>$|your[_-]|xxx|\*{3})/i.test(v);
+
+  text = text.replace(QUOTED_SECRET_PATTERN, (match, before, quote, value) => {
+    if (isReference(value)) return match;
+    count++;
+    return before + quote + REDACTED + quote;
+  });
+
+  text = text.replace(ENV_SECRET_PATTERN, (match, before, value) => {
+    if (isReference(value)) return match;
+    count++;
+    return before + REDACTED;
+  });
 
   return { redacted: text, foundCount: count };
 }
@@ -113,8 +177,15 @@ export function estimateTokens(text) {
 export function scanCodebase(dirPath, options = {}) {
   const root = path.resolve(dirPath);
   const maxFileSizeBytes = options.maxSize || 250 * 1024; // 250 KB default
+  const maxFiles = options.maxFiles || 5000;
   const results = [];
   const skipped = [];
+  let secretFilesSkipped = 0;
+  let truncatedAtFileLimit = false;
+
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    throw new Error(`Not a directory: ${root}`);
+  }
 
   // Parse local .gitignore if exists
   const gitignorePatterns = [];
@@ -173,6 +244,12 @@ export function scanCodebase(dirPath, options = {}) {
           skipped.push({ path: relPath, size: 0, reason: 'directory ignored' });
         }
       } else if (entry.isFile()) {
+        if (isSecretFile(entry.name)) {
+          secretFilesSkipped++;
+          skipped.push({ path: relPath, size: 0, reason: 'credential file never read' });
+          continue;
+        }
+
         if (shouldIgnore(relPath, false)) {
           let s = 0;
           try { s = fs.statSync(fullPath).size; } catch (_) {}
@@ -185,6 +262,11 @@ export function scanCodebase(dirPath, options = {}) {
           if (stat.size > maxFileSizeBytes) {
             skipped.push({ path: relPath, size: stat.size, reason: `exceeds size limit (${Math.round(stat.size / 1024)} KB)` });
             continue;
+          }
+
+          if (results.length >= maxFiles) {
+            truncatedAtFileLimit = true;
+            return;
           }
 
           results.push({
@@ -240,7 +322,10 @@ export function scanCodebase(dirPath, options = {}) {
     totalFiles: files.length,
     totalBytes: totalRawBytes,
     totalTokens: totalRawTokens,
-    totalSecretsMasked
+    totalSecretsMasked,
+    secretFilesSkipped,
+    truncatedAtFileLimit,
+    maxFiles
   };
 }
 
@@ -248,7 +333,7 @@ export function scanCodebase(dirPath, options = {}) {
  * Format files into optimized AI Markdown context
  */
 export function formatAIContext(scanResult, options = {}) {
-  const { files, totalTokens, totalFiles, totalSecretsMasked } = scanResult;
+  const { files, totalTokens, totalFiles, totalSecretsMasked, secretFilesSkipped, truncatedAtFileLimit, maxFiles } = scanResult;
   const budget = options.budget || Infinity;
   const includeTree = options.tree !== false;
 
@@ -259,6 +344,14 @@ export function formatAIContext(scanResult, options = {}) {
 
   if (totalSecretsMasked > 0) {
     header.push(`Security: 🛡️ ${totalSecretsMasked} sensitive credential(s) automatically redacted.`);
+  }
+
+  if (secretFilesSkipped > 0) {
+    header.push(`Security: 🔒 ${secretFilesSkipped} credential file(s) (.env, keys) left out entirely.`);
+  }
+
+  if (truncatedAtFileLimit) {
+    header.push(`Note: stopped at the ${maxFiles.toLocaleString()}-file limit; point at a subfolder for full coverage.`);
   }
 
   if (includeTree) {

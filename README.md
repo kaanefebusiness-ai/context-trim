@@ -1,10 +1,10 @@
 # context-trim ✂️
 
-> **Cut codebase token bloat by 70%+ when packing context for LLMs.**  
-> Ultra-fast CLI and zero-dependency MCP server for **Claude Code, Cursor, Codex, ChatGPT, and Antigravity**.
+> **Pack a whole codebase into lean Markdown context for LLMs: no lockfiles, no build output, no secrets.**
+> Zero-dependency CLI, local MCP server, Claude plugin, and remote MCP server for **Claude Code, Claude, ChatGPT, Codex, and Cursor**.
 
 [![CI](https://github.com/kaanefebusiness-ai/context-trim/actions/workflows/ci.yml/badge.svg)](https://github.com/kaanefebusiness-ai/context-trim/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v1.2.0-blue.svg)](https://www.npmjs.com/package/context-trim)
+[![npm version](https://img.shields.io/badge/npm-v1.3.0-blue.svg)](https://www.npmjs.com/package/context-trim)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
 [![MCP Ready](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
@@ -13,12 +13,12 @@
 
 ## ⚡ Why context-trim?
 
-When you pass entire repositories to AI assistants:
-* Massive lockfiles (`package-lock.json`, `poetry.lock`, `yarn.lock`) waste **50,000+ tokens per query**.
-* Build output folders (`dist`, `.next`, `target`, `vendor`, `__pycache__`) flood context windows.
-* Sensitive API keys (`sk-ant-...`, `sk-proj-...`, `ghp_...`) accidentally leak into LLM prompts.
+When you hand a whole repository to an AI assistant:
+* Lockfiles (`package-lock.json`, `poetry.lock`, `yarn.lock`) can cost tens of thousands of tokens and tell the model nothing.
+* Build and cache folders (`dist`, `.next`, `target`, `vendor`, `__pycache__`) flood the context window.
+* Credentials in `.env` files and source code (`sk-ant-...`, `sk-proj-...`, `ghp_...`) leak into prompts.
 
-**`context-trim` automatically sanitizes, strips out bloat, masks secrets, and outputs a clean context pack directly to your clipboard or file.**
+`context-trim` filters out the bloat, leaves credential files out, masks keys found in code, and gives you one clean Markdown pack in your clipboard, a file, or straight to your assistant through MCP. Run `--stats` to see exactly how many tokens it saves on your project.
 
 ---
 
@@ -47,37 +47,75 @@ npx context-trim -o prompt.md --budget 40000
 
 ## 🛡️ Built-in Security Shield
 
-`context-trim` scans file contents before dispatch and automatically redacts credentials:
-* Anthropic API Keys (`sk-ant-...`)
-* OpenAI API Keys (`sk-proj-...`, `sk-...`)
-* GitHub Personal Access Tokens (`ghp_...`)
-* AWS Access Keys (`AKIA...`)
-* Slack Tokens & SSH Private Keys
+**Credential files are never read.** `.env`, `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), `.envrc`, private keys (`*.pem`, `*.key`, `id_rsa`, `id_ed25519` ...), `.npmrc`, `.pypirc`, `.netrc`, `credentials.json`, `secrets.yaml`, service-account JSON files and Terraform state are skipped entirely.
 
-Masked keys are safely replaced with `[REDACTED_SECRET_KEY]`.
+**Secrets inside other files are masked** with `[REDACTED_SECRET_KEY]`:
+* Anthropic, OpenAI, Stripe, Google, AWS, GitHub and Slack keys and tokens
+* JSON Web Tokens and private key blocks
+* Passwords inside connection strings (`postgres://user:PASSWORD@host`)
+* Quoted values and `.env`-style lines assigned to names such as `password`, `secret`, `api_key`, `access_token`
+
+Masking is pattern-based and can't catch every possible secret, so review what you share when a repository holds sensitive data.
 
 ---
 
-## 🔌 Use as an MCP Server (Claude Desktop & Claude Code)
+## 🔌 Claude Code plugin
 
-`context-trim` comes with native **Model Context Protocol (MCP)** support built-in without installing external packages.
+Install the plugin and Claude gets the MCP tools plus a `pack-codebase` skill that tells it when to use them:
 
-Add it to your Claude configuration (`claude_desktop_config.json`):
+```bash
+claude plugin marketplace add kaanefebusiness-ai/context-trim
+claude plugin install context-trim
+```
+
+The plugin runs `node ${CLAUDE_PLUGIN_ROOT}/bin/cli.js --mcp` from its own folder. Nothing is downloaded at run time.
+
+## 🔌 Local MCP server (Claude Desktop, Cursor, Codex)
+
+Add it to your MCP configuration (for Claude Desktop, `claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "context-trim": {
       "command": "npx",
-      "args": ["-y", "context-trim", "--mcp"]
+      "args": ["-y", "context-trim@1.3.0", "--mcp"]
     }
   }
 }
 ```
 
-### Exposed MCP Tools:
-* **`get_clean_codebase_context`**: Feeds Claude a lean codebase representation without lockfile and cache bloat.
-* **`analyze_token_waste`**: Identifies the heaviest files eating tokens in your workspace.
+The server only reads folders inside the workspace it was started in (its working directory, or `CONTEXT_TRIM_ROOT` when set). Requests for any other path, including symlinks that point outside, are refused.
+
+| Tool | What it does | Annotations |
+|---|---|---|
+| `get_clean_codebase_context` | Packs a project folder into Markdown, up to `budget` tokens (default 20,000) | read-only, not destructive, closed world |
+| `analyze_token_waste` | Shows total tokens, filtered files and the 10 heaviest files | read-only, not destructive, closed world |
+
+## 🌐 Remote MCP server (ChatGPT, Claude connectors)
+
+The remote server reads **public GitHub repositories only**. It never touches the disk of the machine it runs on beyond a temporary folder that is deleted after each request.
+
+```bash
+npx context-trim --http --port 8787        # serves POST /mcp, GET /privacy, GET /health
+docker run -p 8787:8787 <image> --http     # same, from the Dockerfile
+```
+
+| Tool | What it does | Annotations |
+|---|---|---|
+| `pack_github_repository` | Downloads a public repository (`owner/repo` or a GitHub URL, `/tree/<branch>` supported) and packs it | read-only, not destructive, open world |
+| `analyze_github_repository_waste` | Reports token cost and the heaviest files of a public repository | read-only, not destructive, open world |
+
+Limits: 50 MB download, 200 MB unpacked, 5,000 files, 4 repositories at a time (`CONTEXT_TRIM_MAX_CONCURRENCY`).
+
+---
+
+## 🔒 Privacy
+
+* **Local use (CLI, local MCP server, plugin):** context-trim makes no network requests, collects nothing, and has no telemetry. It reads only the folder you point it at, and the result goes only where you send it.
+* **Remote server:** it receives the repository name you ask for, downloads that public repository from GitHub, returns the packed text, and deletes the download. It stores no repository contents, requests or results, and needs no account.
+
+Full policy: [PRIVACY.md](PRIVACY.md) (also served by the remote server at `/privacy`).
 
 ---
 
@@ -90,15 +128,22 @@ Add it to your Claude configuration (`claude_desktop_config.json`):
 | `--stats` | Show token count, skipped files, and estimated cost savings. |
 | `--tree` | Print the filtered file tree with token estimates per file. |
 | `--budget <num>` | Cap context at a specific token ceiling (e.g. `--budget 50000`). |
-| `--mcp` | Start as an MCP server over stdio for Claude / Cursor / Antigravity. |
+| `--mcp` | Start as a local MCP server over stdio. |
+| `--http [--port <n>]` | Start as a remote MCP server over HTTP for public GitHub repositories. |
 | `-v, --version` | Output version number. |
 | `-h, --help` | Display command-line help. |
+
+Token counts are estimates (about 3.8 characters per token), not exact tokenizer output.
 
 ---
 
 ## 📦 Zero Dependencies
 
-Written in native Node.js ESM. Runs in under 2ms with **zero external dependencies**. Compatible with macOS, Windows, and Linux.
+Written in native Node.js ESM (Node 18+) with **zero external dependencies**. Compatible with macOS, Windows, and Linux.
+
+## 💬 Support
+
+Questions, bugs and requests: [GitHub Issues](https://github.com/kaanefebusiness-ai/context-trim/issues).
 
 ---
 

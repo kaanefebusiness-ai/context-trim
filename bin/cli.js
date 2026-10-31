@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scanCodebase, formatAIContext, copyToClipboard } from '../src/index.js';
-import { startMCPServer } from '../src/mcp.js';
+import { startMCPServer, SERVER_VERSION } from '../src/mcp.js';
 
 const args = process.argv.slice(2);
 
@@ -11,6 +11,11 @@ const args = process.argv.slice(2);
 if (args.includes('--mcp')) {
   startMCPServer();
   // Don't log anything in MCP mode as stdout is reserved for JSON-RPC
+} else if (args.includes('--http')) {
+  const pIndex = args.indexOf('--port');
+  const port = pIndex !== -1 && args[pIndex + 1] ? parseInt(args[pIndex + 1], 10) : undefined;
+  const { startHTTPServer } = await import('../src/http.js');
+  startHTTPServer(port ? { port } : {});
 } else if (args.includes('--help') || args.includes('-h')) {
   console.log(`
 context-trim ✂️  Cut codebase bloat for AI context windows.
@@ -24,7 +29,8 @@ OPTIONS:
   --stats                Print detailed token usage and bloat statistics only
   --tree                 Print filtered file tree only
   --budget <tokens>      Cap maximum token budget (e.g. 40000)
-  --mcp                  Run as a Model Context Protocol (MCP) server for Claude / Cursor
+  --mcp                  Run as a local Model Context Protocol (MCP) server over stdio
+  --http [--port <n>]    Run as a remote MCP server over HTTP for public GitHub repos
   -v, --version          Show version
   -h, --help             Show help
 
@@ -33,11 +39,12 @@ EXAMPLES:
   npx context-trim -c                # Packs and copies directly to clipboard
   npx context-trim -o prompt.md      # Exports clean markdown
   npx context-trim --stats           # Analyzes token bloat and estimated cost savings
-  npx context-trim --mcp             # Starts MCP server
+  npx context-trim --mcp             # Starts local MCP server
+  npx context-trim --http --port 8787  # Starts remote MCP server at /mcp
 `);
   process.exit(0);
 } else if (args.includes('--version') || args.includes('-v')) {
-  console.log('context-trim v1.2.0');
+  console.log(`context-trim v${SERVER_VERSION}`);
   process.exit(0);
 } else {
   runCLI();
@@ -76,7 +83,13 @@ async function runCLI() {
   console.log(`\n🔍 Scanning codebase in: \x1b[36m${targetDir}\x1b[0m...`);
 
   const startTime = Date.now();
-  const scan = scanCodebase(targetDir);
+  let scan;
+  try {
+    scan = scanCodebase(targetDir);
+  } catch (err) {
+    console.error(`\n\x1b[31m✖ ${err.message}\x1b[0m\n`);
+    process.exit(1);
+  }
   const elapsed = Date.now() - startTime;
 
   if (isTree) {
@@ -124,7 +137,7 @@ function saveToFile(targetDir, outputFile, content) {
 }
 
 function printStats(scan, elapsed) {
-  // Cost savings estimate: Claude 3.5 Sonnet / GPT-4o input cost (~$3 per 1M tokens)
+  // Cost savings estimate at a typical mid-tier model input price (~$3 per 1M tokens)
   const estimatedSavingsUSD = ((scan.estimatedSavedTokens / 1_000_000) * 3.0).toFixed(4);
 
   console.log('\n' + '─'.repeat(54));
@@ -136,6 +149,9 @@ function printStats(scan, elapsed) {
   console.log(`  Payload Size         : \x1b[36m${Math.round(scan.totalBytes / 1024)} KB\x1b[0m`);
   if (scan.totalSecretsMasked > 0) {
     console.log(`  Security Shield      : \x1b[32m🛡️ ${scan.totalSecretsMasked} secret key(s) redacted\x1b[0m`);
+  }
+  if (scan.secretFilesSkipped > 0) {
+    console.log(`  Credential Files     : \x1b[32m🔒 ${scan.secretFilesSkipped} left out (.env, keys)\x1b[0m`);
   }
   if (scan.estimatedSavedTokens > 0) {
     console.log(`  Estimated Savings    : \x1b[32m~${scan.estimatedSavedTokens.toLocaleString()} tokens (~$${estimatedSavingsUSD} per prompt)\x1b[0m`);

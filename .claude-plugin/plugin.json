@@ -1,0 +1,14 @@
+{
+  "name": "context-trim",
+  "displayName": "context-trim",
+  "version": "1.3.0",
+  "description": "Pack a whole project into lean Markdown context: no lockfiles, build output, caches or binaries, credential files left out and API keys masked. Runs locally with zero dependencies and no network access.",
+  "author": {
+    "name": "Kaan Efe Demir",
+    "url": "https://github.com/kaanefebusiness-ai"
+  },
+  "homepage": "https://github.com/kaanefebusiness-ai/context-trim#readme",
+  "repository": "https://github.com/kaanefebusiness-ai/context-trim",
+  "license": "MIT",
+  "keywords": ["context", "tokens", "codebase", "mcp", "developer-tools"]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "context-trim",
+  "owner": {
+    "name": "Kaan Efe Demir",
+    "url": "https://github.com/kaanefebusiness-ai"
+  },
+  "metadata": {
+    "description": "context-trim: lean codebase context for Claude, with lockfiles, build output and secrets left out."
+  },
+  "plugins": [
+    {
+      "name": "context-trim",
+      "source": "./",
+      "description": "Pack a whole project into lean Markdown context without lockfiles, build output or secrets."
+    }
+  ]
+}

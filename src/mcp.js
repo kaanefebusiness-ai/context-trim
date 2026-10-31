@@ -1,175 +1,273 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { scanCodebase, formatAIContext } from './index.js';
 
 /**
- * Lightweight Zero-Dependency MCP Server over standard I/O (JSON-RPC 2.0).
- * Compatible with Claude Desktop, Claude Code, Cursor, Antigravity.
+ * Lightweight Zero-Dependency MCP Server (JSON-RPC 2.0).
+ * One message handler shared by the stdio transport (local, reads your disk)
+ * and the Streamable HTTP transport (remote, reads public GitHub repositories).
  */
-export function startMCPServer() {
-  const SERVER_NAME = 'context-trim';
-  const SERVER_VERSION = '1.0.0';
 
-  const tools = [
-    {
-      name: 'get_clean_codebase_context',
-      description: 'Scans and packs the current project into an optimized token-trimmed markdown context for LLMs.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Target directory path to pack (defaults to current working directory).'
-          },
-          budget: {
-            type: 'number',
-            description: 'Maximum token budget cap (e.g. 50000).'
-          }
-        }
-      }
+export const SERVER_NAME = 'context-trim';
+export const SERVER_VERSION = JSON.parse(
+  fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
+
+// Newest first. We answer with the client's version when we support it.
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+// Claude Code warns above ~25k tokens of tool output, so stay under it by default
+export const DEFAULT_MCP_BUDGET = 20000;
+
+const READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true
+};
+
+const budgetProperty = {
+  type: 'integer',
+  minimum: 1000,
+  description: `Maximum tokens to return (default ${DEFAULT_MCP_BUDGET.toLocaleString()}). Files past the budget are listed by name only.`
+};
+
+const LOCAL_TOOLS = [
+  {
+    name: 'get_clean_codebase_context',
+    title: 'Pack Clean Codebase Context',
+    description:
+      'Reads the project folder on this machine and returns its source files as one Markdown document, ' +
+      'leaving out lockfiles, build output, caches, binaries and credential files (.env, keys), and masking API keys found in code. ' +
+      'Use it when you need an overview of a whole project in one call. Read-only: it never writes, deletes or sends anything. ' +
+      'Only folders inside the workspace the server was started in can be read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Folder to pack, absolute or relative to the workspace root. Defaults to the workspace root.'
+        },
+        budget: budgetProperty
+      },
+      additionalProperties: false
     },
-    {
-      name: 'analyze_token_waste',
-      description: 'Analyzes which files, lockfiles, or directories in the project are consuming the most tokens.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Target directory path to inspect.'
-          }
+    annotations: { title: 'Pack Clean Codebase Context', ...READ_ONLY_ANNOTATIONS, openWorldHint: false }
+  },
+  {
+    name: 'analyze_token_waste',
+    title: 'Analyze Token Waste',
+    description:
+      'Reports how many tokens a project folder on this machine would cost, how many bloat files are filtered out, ' +
+      'and which 10 files are the heaviest. Use it before packing to decide what to trim. Read-only. ' +
+      'Only folders inside the workspace the server was started in can be read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Folder to inspect, absolute or relative to the workspace root. Defaults to the workspace root.'
         }
+      },
+      additionalProperties: false
+    },
+    annotations: { title: 'Analyze Token Waste', ...READ_ONLY_ANNOTATIONS, openWorldHint: false }
+  }
+];
+
+const repositoryProperty = {
+  type: 'string',
+  description: 'Public GitHub repository, as "owner/repo" or a https://github.com/owner/repo URL. A /tree/<branch> URL selects that branch.'
+};
+
+const REMOTE_TOOLS = [
+  {
+    name: 'pack_github_repository',
+    title: 'Pack GitHub Repository',
+    description:
+      'Downloads a public GitHub repository and returns its source files as one Markdown document, ' +
+      'leaving out lockfiles, build output, caches, binaries and credential files, and masking API keys found in code. ' +
+      'Use it when the user shares a public GitHub repository and wants it reviewed, explained or summarized. ' +
+      'Read-only. Private repositories are not supported. Nothing is stored after the call.',
+    inputSchema: {
+      type: 'object',
+      properties: { repository: repositoryProperty, budget: budgetProperty },
+      required: ['repository'],
+      additionalProperties: false
+    },
+    annotations: { title: 'Pack GitHub Repository', ...READ_ONLY_ANNOTATIONS, openWorldHint: true }
+  },
+  {
+    name: 'analyze_github_repository_waste',
+    title: 'Analyze GitHub Repository Size',
+    description:
+      'Downloads a public GitHub repository and reports its token cost, how many bloat files are filtered out, ' +
+      'and which 10 files are the heaviest. Use it to judge whether a repository fits in context before packing it. ' +
+      'Read-only. Private repositories are not supported. Nothing is stored after the call.',
+    inputSchema: {
+      type: 'object',
+      properties: { repository: repositoryProperty },
+      required: ['repository'],
+      additionalProperties: false
+    },
+    annotations: { title: 'Analyze GitHub Repository Size', ...READ_ONLY_ANNOTATIONS, openWorldHint: true }
+  }
+];
+
+/**
+ * Resolve a requested path and refuse anything outside the workspace root.
+ */
+export function resolveInsideRoot(root, requested) {
+  const realRoot = fs.realpathSync(root);
+  const target = path.resolve(realRoot, requested || '.');
+  let realTarget;
+  try {
+    realTarget = fs.realpathSync(target);
+  } catch (_) {
+    throw new Error(`Folder not found: ${requested}`);
+  }
+  const rel = path.relative(realRoot, realTarget);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Access denied: "${requested}" is outside the workspace (${realRoot}).`);
+  }
+  return realTarget;
+}
+
+function readBudget(value) {
+  if (value === undefined || value === null) return DEFAULT_MCP_BUDGET;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1000) throw new Error('budget must be a number of at least 1000.');
+  return Math.floor(n);
+}
+
+export function formatWasteReport(scan, label) {
+  return [
+    `# Token Waste Analysis for: ${label}`,
+    `- Total Clean Files Included: ${scan.totalFiles}`,
+    `- Total Tokens: ${scan.totalTokens.toLocaleString()}`,
+    `- Unwanted / Bloat Files Filtered Out: ${scan.skippedCount}`,
+    `- Credential Files Left Out: ${scan.secretFilesSkipped}`,
+    `- Secrets Masked In Code: ${scan.totalSecretsMasked}`,
+    ...(scan.truncatedAtFileLimit ? [`- Note: stopped at the ${scan.maxFiles.toLocaleString()}-file limit`] : []),
+    `\n### Top 10 Heaviest Files:\n`,
+    ...[...scan.files]
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 10)
+      .map((f, i) => `${i + 1}. \`${f.path}\` -> ${f.tokens.toLocaleString()} tokens (${Math.round(f.size / 1024)} KB)`)
+  ].join('\n');
+}
+
+/**
+ * Build a JSON-RPC message handler.
+ * mode 'local'  → tools read folders under `root`
+ * mode 'remote' → tools read public GitHub repositories through `remote`
+ */
+export function createMessageHandler({ mode = 'local', root = process.cwd(), remote } = {}) {
+  const tools = mode === 'remote' ? REMOTE_TOOLS : LOCAL_TOOLS;
+
+  const ok = (id, result) => ({ jsonrpc: '2.0', id, result });
+  const fail = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
+  const text = (body, isError = false) => ({ content: [{ type: 'text', text: body }], ...(isError ? { isError: true } : {}) });
+
+  async function callTool(name, args) {
+    if (mode === 'local') {
+      if (name === 'get_clean_codebase_context') {
+        const budget = readBudget(args.budget);
+        const scan = scanCodebase(resolveInsideRoot(root, args.path));
+        return text(formatAIContext(scan, { budget }));
+      }
+      if (name === 'analyze_token_waste') {
+        const dir = resolveInsideRoot(root, args.path);
+        return text(formatWasteReport(scanCodebase(dir), dir));
+      }
+    } else {
+      if (name === 'pack_github_repository') {
+        const budget = readBudget(args.budget);
+        return text(await remote.withRepository(args.repository, (scan, label) =>
+          formatAIContext(scan, { budget }).replace('# Codebase Context', `# Codebase Context: ${label}`)));
+      }
+      if (name === 'analyze_github_repository_waste') {
+        return text(await remote.withRepository(args.repository, (scan, label) => formatWasteReport(scan, label)));
       }
     }
-  ];
-
-  function sendResponse(id, result) {
-    const payload = JSON.stringify({ jsonrpc: '2.0', id, result });
-    process.stdout.write(`Content-Length: ${Buffer.byteLength(payload, 'utf8')}\r\n\r\n${payload}`);
+    return null;
   }
 
-  function sendError(id, code, message) {
-    const payload = JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
-    process.stdout.write(`Content-Length: ${Buffer.byteLength(payload, 'utf8')}\r\n\r\n${payload}`);
-  }
+  return async function handleMessage(msg) {
+    if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') {
+      return fail(null, -32600, 'Invalid Request');
+    }
+    const { id, method, params } = msg;
+    const isNotification = id === undefined;
+
+    // Notifications (initialized, cancelled, ...) never get a reply
+    if (isNotification) return null;
+
+    switch (method) {
+      case 'initialize': {
+        const requested = params?.protocolVersion;
+        return ok(id, {
+          protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0],
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: SERVER_NAME, title: 'context-trim', version: SERVER_VERSION },
+          instructions: mode === 'remote'
+            ? 'Packs public GitHub repositories into lean Markdown context. Call analyze_github_repository_waste first for large repositories.'
+            : 'Packs the local project into lean Markdown context. Call analyze_token_waste first for large projects.'
+        });
+      }
+      case 'ping':
+        return ok(id, {});
+      case 'tools/list':
+        return ok(id, { tools });
+      case 'tools/call': {
+        const name = params?.name;
+        if (!tools.some(t => t.name === name)) {
+          return fail(id, -32602, `Unknown tool: ${name}`);
+        }
+        try {
+          return ok(id, await callTool(name, params?.arguments || {}));
+        } catch (err) {
+          // Tool failures go back as results so the model can read and react to them
+          return ok(id, text(`Error: ${err.message}`, true));
+        }
+      }
+      default:
+        return fail(id, -32601, `Method not found: ${method}`);
+    }
+  };
+}
+
+/**
+ * stdio transport: one JSON-RPC message per line, nothing else on stdout.
+ */
+export function startMCPServer() {
+  const root = process.env.CONTEXT_TRIM_ROOT || process.cwd();
+  const handleMessage = createMessageHandler({ mode: 'local', root });
+  const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 
   let buffer = '';
-
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => {
     buffer += chunk;
+    let lineEnd;
+    while ((lineEnd = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      if (!line) continue;
 
-    while (true) {
-      const headerEnd = buffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) {
-        // Fallback for simple line-by-line JSON-RPC
-        const lineEnd = buffer.indexOf('\n');
-        if (lineEnd !== -1) {
-          const line = buffer.slice(0, lineEnd).trim();
-          buffer = buffer.slice(lineEnd + 1);
-          if (line) {
-            try {
-              handleMessage(JSON.parse(line));
-            } catch (_) {}
-          }
-          continue;
-        }
-        break;
-      }
-
-      const header = buffer.slice(0, headerEnd);
-      const match = header.match(/Content-Length:\s*(\d+)/i);
-      if (!match) {
-        buffer = buffer.slice(headerEnd + 4);
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (_) {
+        send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
         continue;
       }
 
-      const contentLength = parseInt(match[1], 10);
-      const bodyStart = headerEnd + 4;
-      if (buffer.length < bodyStart + contentLength) {
-        break; // Wait for full body
-      }
-
-      const body = buffer.slice(bodyStart, bodyStart + contentLength);
-      buffer = buffer.slice(bodyStart + contentLength);
-
-      try {
-        const msg = JSON.parse(body);
-        handleMessage(msg);
-      } catch (err) {
-        // Ignore parse error
-      }
+      const messages = Array.isArray(msg) ? msg : [msg];
+      Promise.all(messages.map(handleMessage)).then(replies => {
+        const out = replies.filter(Boolean);
+        if (out.length) send(Array.isArray(msg) ? out : out[0]);
+      });
     }
   });
-
-  function handleMessage(msg) {
-    if (!msg || typeof msg !== 'object') return;
-    const { id, method, params } = msg;
-
-    if (method === 'initialize') {
-      sendResponse(id, {
-        protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
-      });
-      return;
-    }
-
-    if (method === 'notifications/initialized') {
-      return;
-    }
-
-    if (method === 'tools/list') {
-      sendResponse(id, { tools });
-      return;
-    }
-
-    if (method === 'tools/call') {
-      const toolName = params?.name;
-      const args = params?.arguments || {};
-      const targetDir = args.path || process.cwd();
-
-      if (toolName === 'get_clean_codebase_context') {
-        try {
-          const scan = scanCodebase(targetDir);
-          const output = formatAIContext(scan, { budget: args.budget });
-          sendResponse(id, {
-            content: [{ type: 'text', text: output }]
-          });
-        } catch (err) {
-          sendError(id, -32000, err.message);
-        }
-        return;
-      }
-
-      if (toolName === 'analyze_token_waste') {
-        try {
-          const scan = scanCodebase(targetDir);
-          const report = [
-            `# Token Waste Analysis for: ${targetDir}`,
-            `- Total Clean Files Included: ${scan.totalFiles}`,
-            `- Total Tokens: ${scan.totalTokens.toLocaleString()}`,
-            `- Unwanted / Bloat Files Filtered Out: ${scan.skippedCount}`,
-            `\n### Top 10 Heaviest Files:\n`,
-            ...scan.files
-              .sort((a, b) => b.tokens - a.tokens)
-              .slice(0, 10)
-              .map((f, i) => `${i + 1}. \`${f.path}\` -> ${f.tokens.toLocaleString()} tokens (${Math.round(f.size / 1024)} KB)`)
-          ].join('\n');
-
-          sendResponse(id, {
-            content: [{ type: 'text', text: report }]
-          });
-        } catch (err) {
-          sendError(id, -32000, err.message);
-        }
-        return;
-      }
-
-      sendError(id, -32601, `Unknown tool: ${toolName}`);
-      return;
-    }
-
-    if (id !== undefined) {
-      sendError(id, -32601, `Method not found: ${method}`);
-    }
-  }
+  process.stdin.on('end', () => process.exit(0));
 }
