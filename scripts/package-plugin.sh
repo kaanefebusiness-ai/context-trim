@@ -8,6 +8,6 @@ mkdir -p dist
 OUT="dist/context-trim-$VERSION.zip"
 rm -f "$OUT"
 git archive --format=zip -o "$OUT" HEAD -- \
-  .claude-plugin .codex-plugin .mcp.json skills assets bin src \
+  .claude-plugin .codex-plugin .mcp.json skills openai-skills assets bin src \
   package.json README.md PRIVACY.md TERMS.md LICENSE
 echo "$OUT"

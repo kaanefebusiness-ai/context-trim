@@ -214,6 +214,24 @@ assert.strictEqual(fs.readFileSync(path.join(unpackDir, 'src', 'index.js'), 'utf
 assert.ok(!fs.existsSync(path.resolve(unpackDir, '..', '..', 'evil.txt')), 'Path traversal must be blocked');
 assert.ok(!fs.existsSync(path.join(unpackDir, 'link')), 'Symlinks are skipped');
 
+// Test 11b: HTTP listener (remote server) without touching the network
+const { createRequestListener } = await import('../src/http.js');
+const http = await import('node:http');
+process.env.OPENAI_APPS_CHALLENGE = 'challenge-token-123\n';
+const server = http.createServer(createRequestListener());
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const base = `http://127.0.0.1:${server.address().port}`;
+assert.strictEqual(await (await fetch(`${base}/.well-known/openai-apps-challenge`)).text(), 'challenge-token-123');
+assert.strictEqual((await fetch(`${base}/privacy`)).status, 200);
+assert.strictEqual((await fetch(`${base}/mcp`)).status, 405);
+const rpc = body => fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+assert.strictEqual((await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202);
+const remoteTools = (await (await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json()).result.tools;
+assert.deepStrictEqual(remoteTools.map(t => t.name), ['pack_github_repository', 'analyze_github_repository_waste']);
+assert.ok(remoteTools.every(t => t.annotations.openWorldHint === true));
+server.close();
+delete process.env.OPENAI_APPS_CHALLENGE;
+
 // Test 12: every manifest ships the same version as package.json
 for (const manifest of ['.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
   const { version } = JSON.parse(fs.readFileSync(path.join(repoRoot, manifest), 'utf8'));

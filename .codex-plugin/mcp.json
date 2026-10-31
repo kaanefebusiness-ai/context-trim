@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "context-trim": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/bin/cli.js", "--mcp"]
+      "type": "streamable-http",
+      "url": "https://context-trim.kaanefedemir.co/mcp"
     }
   }
 }

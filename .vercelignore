@@ -1,0 +1,9 @@
+dist
+test
+assets
+skills
+.claude-plugin
+.codex-plugin
+.github
+Dockerfile
+openai-skills

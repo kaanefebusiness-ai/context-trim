@@ -41,7 +41,10 @@ function renderPrivacyPage() {
 </head><body>${html.join('\n')}</body></html>`;
 }
 
-export function startHTTPServer({ port = Number(process.env.PORT || 8787), host = process.env.HOST || '0.0.0.0' } = {}) {
+/**
+ * Plain (req, res) listener, usable by node:http and by serverless hosts (Vercel).
+ */
+export function createRequestListener() {
   const privacyPage = renderPrivacyPage();
   let activeScans = 0;
 
@@ -67,8 +70,16 @@ export function startHTTPServer({ port = Number(process.env.PORT || 8787), host 
     res.end(payload);
   }
 
-  const server = http.createServer((req, res) => {
+  return function listener(req, res) {
     const { pathname } = new URL(req.url, 'http://localhost');
+
+    // OpenAI plugin domain verification: the token shown in the portal, as plain text
+    if (req.method === 'GET' && pathname === '/.well-known/openai-apps-challenge') {
+      const token = process.env.OPENAI_APPS_CHALLENGE;
+      if (!token) return sendJSON(res, 404, { error: 'Not found' });
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end(token.trim());
+    }
 
     if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
       return sendJSON(res, 200, { name: SERVER_NAME, version: SERVER_VERSION, mcp: '/mcp', privacy: '/privacy' });
@@ -114,8 +125,11 @@ export function startHTTPServer({ port = Number(process.env.PORT || 8787), host 
       }
       sendJSON(res, 200, Array.isArray(msg) ? replies : replies[0]);
     });
-  });
+  };
+}
 
+export function startHTTPServer({ port = Number(process.env.PORT || 8787), host = process.env.HOST || '0.0.0.0' } = {}) {
+  const server = http.createServer(createRequestListener());
   server.listen(port, host, () => {
     console.error(`context-trim remote MCP server listening on http://${host}:${port}/mcp`);
   });

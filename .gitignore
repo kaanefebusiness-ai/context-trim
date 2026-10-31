@@ -4,3 +4,5 @@ node_modules/
 ai-context.md
 *.tgz
 dist/
+.vercel
+.env*

@@ -1,7 +1,7 @@
 {
   "name": "context-trim",
   "version": "1.3.1",
-  "description": "Pack a whole project into lean Markdown context: no lockfiles, build output, caches or binaries, credential files left out and API keys masked.",
+  "description": "Pack any public GitHub repository into lean Markdown context: no lockfiles, build output, caches or binaries, credential files left out and API keys masked.",
   "author": {
     "name": "Kaan Efe Demir",
     "url": "https://github.com/kaanefebusiness-ai"
@@ -16,12 +16,12 @@
     "mcp",
     "developer-tools"
   ],
-  "skills": "./skills/",
+  "skills": "./openai-skills/",
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "context-trim",
-    "shortDescription": "Lean codebase context without lockfiles or secrets",
-    "longDescription": "context-trim packs a whole project into one Markdown document for the model. It leaves out lockfiles, build output, caches and binaries, never reads credential files such as .env or private keys, and masks API keys and passwords found in code. It is read-only: it never writes, deletes or sends anything, and it only reads folders inside your workspace. Use it to review, explain or summarize a codebase in one step, or to check how many tokens a project costs before you pack it.",
+    "shortDescription": "Lean context from public GitHub repositories",
+    "longDescription": "context-trim packs a public GitHub repository into one Markdown document for the model. It leaves out lockfiles, build output, caches and binaries, never includes credential files such as .env or private keys, and masks API keys and passwords found in code. It is read-only and stores nothing: the repository is downloaded, packed and deleted within the request. Use it to review, explain or summarize a repository, or to check how many tokens it costs before packing it.",
     "developerName": "Kaan Efe Demir",
     "category": "Developer Tools",
     "capabilities": [],
@@ -30,8 +30,8 @@
     "privacyPolicyURL": "https://github.com/kaanefebusiness-ai/context-trim/blob/main/PRIVACY.md",
     "termsOfServiceURL": "https://github.com/kaanefebusiness-ai/context-trim/blob/main/TERMS.md",
     "defaultPrompt": [
-      "Give me an overview of this codebase",
-      "How many tokens would this project cost to send?"
+      "Explain how this repository is structured: github.com/owner/repo",
+      "How many tokens is the sindresorhus/is repository?"
     ],
     "brandColor": "#111827",
     "brandColorDark": "#F9FAFB",
@@ -46,55 +46,55 @@
         "test_cases": {
           "positive": [
             {
-              "description": "Packs the open project for a whole-codebase overview",
-              "prompt": "Give me an overview of this codebase and how its parts fit together.",
-              "tools_triggered": "analyze_token_waste, get_clean_codebase_context",
-              "expected_behavior": "Checks the token cost first, then packs the project and explains its structure from the packed files."
+              "description": "Explains a public repository from its code",
+              "prompt": "Explain how the code in https://github.com/sindresorhus/is is organized.",
+              "tools_triggered": "analyze_github_repository_waste, pack_github_repository",
+              "expected_behavior": "Checks the size first, packs the repository and explains its structure from the packed files."
             },
             {
               "description": "Reports token cost and heaviest files",
-              "prompt": "How many tokens would it cost to send this whole project to you, and which files are the biggest?",
-              "tools_triggered": "analyze_token_waste",
+              "prompt": "How many tokens would the sindresorhus/is repository cost, and which files are the biggest?",
+              "tools_triggered": "analyze_github_repository_waste",
               "expected_behavior": "Returns total tokens, the number of filtered files and the 10 heaviest files."
             },
             {
-              "description": "Packs only a subfolder",
-              "prompt": "Review the code in the src folder for bugs.",
-              "tools_triggered": "get_clean_codebase_context",
-              "expected_behavior": "Packs the src folder only (path set to src) and reviews it."
+              "description": "Packs a specific branch",
+              "prompt": "Summarize the code on the main branch of https://github.com/kaanefebusiness-ai/context-trim/tree/main",
+              "tools_triggered": "pack_github_repository",
+              "expected_behavior": "Packs the main branch and summarizes what the tool does."
             },
             {
               "description": "Respects a token budget",
-              "prompt": "Summarize this repository, but keep the context under 10,000 tokens.",
-              "tools_triggered": "get_clean_codebase_context",
+              "prompt": "Review sindresorhus/is for code quality, but keep the context under 10,000 tokens.",
+              "tools_triggered": "pack_github_repository",
               "expected_behavior": "Calls the tool with budget 10000; files past the budget are listed by name only and the answer says which were left out."
             },
             {
-              "description": "Keeps secrets out of the context",
-              "prompt": "Pack this project so I can paste it into another chat. Make sure no API keys are included.",
-              "tools_triggered": "get_clean_codebase_context",
-              "expected_behavior": "Returns the pack with .env and key files left out and any keys in code shown as [REDACTED_SECRET_KEY]."
+              "description": "Clear error for a missing or private repository",
+              "prompt": "Pack the repository github.com/this-owner-does-not-exist-123/nothing-here for me.",
+              "tools_triggered": "pack_github_repository",
+              "expected_behavior": "The tool returns an error that the repository was not found or is private, and the assistant explains that only public repositories work."
             }
           ],
           "negative": [
             {
-              "description": "Single-file question does not need the whole project",
-              "prompt": "What does the function on line 12 of utils.js do?"
-            },
-            {
-              "description": "General programming question with no project involved",
+              "description": "General programming question with no repository",
               "prompt": "What is the difference between let and const in JavaScript?"
             },
             {
-              "description": "Request to write or change files",
-              "prompt": "Create a new README file for my project."
+              "description": "Code pasted directly into the chat",
+              "prompt": "Here is my function: function add(a, b) { return a - b } — why does it return the wrong result?"
+            },
+            {
+              "description": "Request to change a repository",
+              "prompt": "Open a pull request on github.com/sindresorhus/is that fixes a typo."
             }
           ]
         },
         "commerce": false
       },
       "publication": {
-        "release_notes": "First directory release: lean codebase packing that uses the client's project roots, leaves credential files out, masks API keys, stays inside the workspace and returns at most 20,000 tokens by default."
+        "release_notes": "First directory release: packs public GitHub repositories into lean Markdown with lockfiles, build output and credential files left out, API keys masked and nothing stored."
       }
     }
   }
