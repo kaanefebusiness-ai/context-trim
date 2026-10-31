@@ -94,6 +94,8 @@ The server only reads folders inside the workspace: the project roots your clien
 
 ## 🌐 Remote MCP server (ChatGPT, Claude connectors)
 
+Hosted endpoint: **`https://context-trim.kaanefedemir.co/mcp`** (no login; privacy policy at [`/privacy`](https://context-trim.kaanefedemir.co/privacy)).
+
 The remote server reads **public GitHub repositories only**. It never touches the disk of the machine it runs on beyond a temporary folder that is deleted after each request.
 
 ```bash
